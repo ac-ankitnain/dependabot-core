@@ -320,6 +320,16 @@ RSpec.describe Dependabot::Package::PackageLatestVersionFinder do
         expect(latest_version).to eq(TestVersion.new("6.1.4"))
       end
     end
+
+    context "with an exact pin and upper bound constraint" do
+      let(:dependency_requirements) do
+        [{ file: "Gemfile", requirement: "==6.0.0,<7.0.0", groups: [], source: nil }]
+      end
+
+      it "ignores the exact pin but respects the upper bound" do
+        expect(latest_version).to eq(TestVersion.new("6.1.4"))
+      end
+    end
   end
 
   describe "#latest_version_with_no_unlock" do
