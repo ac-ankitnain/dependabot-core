@@ -203,6 +203,8 @@ module Dependabot
       end
       def filter_prerelease_versions(releases)
         return releases if wants_prerelease?
+        # Don't filter out pre-releases if there are security advisories and no stable version fixes them
+        return releases if security_advisories.any? && !stable_version_fixes_vulnerability?(releases)
 
         filtered = releases.reject { |release| release.version.prerelease? }
 
@@ -211,6 +213,22 @@ module Dependabot
         end
 
         filtered
+      end
+
+      sig do
+        params(releases: T::Array[Dependabot::Package::PackageRelease])
+          .returns(T::Boolean)
+      end
+      def stable_version_fixes_vulnerability?(releases)
+        return false if security_advisories.empty?
+
+        stable_releases = releases.reject { |release| release.version.prerelease? }
+        non_vulnerable_stable = Dependabot::UpdateCheckers::VersionFilters
+                                .filter_vulnerable_versions(
+                                  stable_releases,
+                                  security_advisories
+                                )
+        non_vulnerable_stable.any?
       end
 
       sig do
@@ -356,12 +374,15 @@ module Dependabot
 
         releases = filter_yanked_versions(releases)
         releases = filter_unsupported_versions(releases, language_version)
-        # versions = filter_prerelease_versions(versions)
+        # Filter vulnerable versions first
         releases = Dependabot::UpdateCheckers::VersionFilters
                    .filter_vulnerable_versions(
                      releases,
                      security_advisories
                    )
+        # Apply prerelease filtering before filtering lower versions
+        # This checks if any stable version fixes the vulnerability (regardless of current version)
+        releases = filter_prerelease_versions(releases)
         releases = filter_ignored_versions(releases)
         releases = filter_lower_versions(releases)
         releases = apply_post_fetch_lowest_security_fix_versions_filter(releases)
