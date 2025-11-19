@@ -310,6 +310,16 @@ RSpec.describe Dependabot::Package::PackageLatestVersionFinder do
         end
       end
     end
+
+    context "with an upper bound restriction" do
+      let(:dependency_requirements) do
+        [{ file: "Gemfile", requirement: ">=6.0.0,<7.0.0", groups: [], source: nil }]
+      end
+
+      it "respects the upper bound and returns the highest version below it" do
+        expect(latest_version).to eq(TestVersion.new("6.1.4"))
+      end
+    end
   end
 
   describe "#latest_version_with_no_unlock" do
