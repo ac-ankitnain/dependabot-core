@@ -264,6 +264,38 @@ module Dependabot
       end
 
       sig do
+        params(releases: T::Array[Dependabot::Package::PackageRelease])
+          .returns(T::Array[Dependabot::Package::PackageRelease])
+      end
+      def filter_out_of_range_non_exact_versions(releases)
+        # Filter based on range requirements only (e.g., <, >, >=, <=, !=)
+        # This allows finding the latest version while respecting upper/lower bounds
+        # but ignoring pinning constraints like ==, ~=, ^ which are the target of the update
+        reqs = dependency.requirements.filter_map do |r|
+          next if r.fetch(:requirement).nil?
+
+          requirement_string = r.fetch(:requirement)
+          # Split by comma to get individual requirement parts
+          range_parts = requirement_string.split(",").map(&:strip).select do |part|
+            # Keep only range requirements (not pinning requirements)
+            # Range requirements: <, >, >=, <=, !=
+            # Pinning requirements: =, ==, ===, ~=, ^, or bare version numbers
+            part.match?(/^\s*(<|>|>=|<=|!=)\s*\d/)
+          end
+
+          # If there are range parts, join them back
+          range_parts.empty? ? nil : requirement_class.requirements_array(range_parts.join(","))
+        end.flatten
+
+        # If there are no range requirements, return all releases
+        return releases if reqs.empty?
+
+        releases.select do |release|
+          reqs.all? { |req| req.satisfied_by?(release.version) }
+        end
+      end
+
+      sig do
         params(
           current_version: T.nilable(Dependabot::Version),
           new_version: Dependabot::Version
@@ -342,6 +374,7 @@ module Dependabot
         releases = filter_unsupported_versions(releases, language_version)
         releases = filter_prerelease_versions(releases)
         releases = filter_ignored_versions(releases)
+        releases = filter_out_of_range_non_exact_versions(releases)
         releases = apply_post_fetch_latest_versions_filter(releases)
         releases.max_by(&:version)&.version
       end
