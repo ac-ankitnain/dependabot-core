@@ -37,6 +37,8 @@ module Dependabot
           )
         end
 
+        # rubocop:disable Metrics/AbcSize
+        # rubocop:disable Metrics/MethodLength
         sig { params(build_file: Dependabot::DependencyFile).returns(T::Array[Dependabot::DependencyFile]) }
         def update_files(build_file)
           # We only run this updater if it's a distribution dependency
@@ -49,6 +51,12 @@ module Dependabot
           # If we don't have any files in the build files don't generate one
           return [] unless local_files.any?
 
+          # we only run this updater if the build file has a requirement for this dependency
+          target_requirements = dependency.requirements.select do |req|
+            T.let(req[:file], String) == build_file.name
+          end
+          return [] unless target_requirements.any?
+
           updated_files = dependency_files.dup
           SharedHelpers.in_a_temporary_directory do |temp_dir|
             populate_temp_directory(temp_dir)
@@ -56,14 +64,34 @@ module Dependabot
 
             # Create gradle.properties file with proxy settings
             # Would prefer to use command line arguments, but they don't work.
-            properties_filename = File.join(temp_dir, build_file.directory, "gradle.properties")
+            properties_filename = File.join(cwd, "gradle.properties")
             write_properties_file(properties_filename)
 
-            command_parts = %w(gradle --no-daemon --stacktrace) + command_args
-            command = Shellwords.join(command_parts)
+            command_parts = %w(--no-daemon --stacktrace) + command_args(target_requirements)
+            command = Shellwords.join(["./gradlew"] + command_parts)
 
             Dir.chdir(cwd) do
-              SharedHelpers.run_shell_command(command, cwd: cwd)
+              FileUtils.chmod("+x", "./gradlew") if File.exist?(File.join(cwd, "./gradlew"))
+
+              properties_file = File.join(cwd, "gradle/wrapper/gradle-wrapper.properties")
+              validate_option = get_validate_distribution_url_option(properties_file)
+
+              begin
+                # first attempt: run the wrapper task via the local gradle wrapper
+                # `gradle-wrapper.jar` might be too old to run on host's Java version
+                SharedHelpers.run_shell_command(command, cwd: cwd)
+              rescue SharedHelpers::HelperSubprocessFailed => e
+                puts "Running #{command} failed, retrying first with system Gradle: #{e.message}"
+
+                # second attempt: run the wrapper task via system gradle and then retry via local wrapper
+                system_command = Shellwords.join(["gradle"] + command_parts)
+                SharedHelpers.run_shell_command(system_command, cwd: cwd) # run via system gradle
+                SharedHelpers.run_shell_command(command, cwd: cwd) # retry via local wrapper
+              end
+
+              # Restore previous validateDistributionUrl option if it existed
+              override_validate_distribution_url_option(properties_file, validate_option)
+
               update_files_content(temp_dir, local_files, updated_files)
             rescue SharedHelpers::HelperSubprocessFailed => e
               puts "Failed to update files: #{e.message}"
@@ -72,6 +100,8 @@ module Dependabot
           end
           updated_files
         end
+        # rubocop:enable Metrics/AbcSize
+        # rubocop:enable Metrics/MethodLength
 
         private
 
@@ -80,12 +110,15 @@ module Dependabot
           @target_files.any? { |r| "/#{file.name}".end_with?(r) }
         end
 
-        sig { returns(T::Array[String]) }
-        def command_args
-          version = T.let(dependency.requirements[0]&.[](:requirement), String)
-          checksum = T.let(dependency.requirements[1]&.[](:requirement), String) if dependency.requirements.size > 1
+        sig { params(requirements: T::Array[T::Hash[Symbol, T.untyped]]).returns(T::Array[String]) }
+        def command_args(requirements)
+          version = T.let(requirements[0]&.[](:requirement), String)
+          checksum = T.let(requirements[1]&.[](:requirement), String) if dependency.requirements.size > 1
+          distribution_url = T.let(requirements[0]&.[](:source), T::Hash[Symbol, String])[:url]
+          distribution_type = distribution_url&.match(/\b(bin|all)\b/)&.captures&.first
 
-          args = %W(wrapper --no-validate-url --gradle-version #{version})
+          args = %W(wrapper --gradle-version #{version} --no-validate-url)
+          args += %W(--distribution-type #{distribution_type}) if distribution_type
           args += %W(--gradle-distribution-sha256-sum #{checksum}) if checksum
           args
         end
@@ -133,6 +166,26 @@ module Dependabot
             FileUtils.mkdir_p(File.dirname(in_path_name))
             File.write(in_path_name, file.content)
           end
+        end
+
+        sig { params(properties_file: T.any(Pathname, String)).returns(T.nilable(String)) }
+        def get_validate_distribution_url_option(properties_file)
+          return nil unless File.exist?(properties_file)
+
+          properties_content = File.read(properties_file)
+          properties_content.match(/^validateDistributionUrl=(.*)$/)&.captures&.first
+        end
+
+        sig { params(properties_file: T.any(Pathname, String), value: T.nilable(String)).void }
+        def override_validate_distribution_url_option(properties_file, value)
+          return unless File.exist?(properties_file)
+
+          properties_content = File.read(properties_file)
+          updated_content = properties_content.gsub(
+            /^validateDistributionUrl=(.*)\n/,
+            value ? "validateDistributionUrl=#{value}\n" : ""
+          )
+          File.write(properties_file, updated_content)
         end
 
         sig { params(file_name: String).void }
